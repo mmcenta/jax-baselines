@@ -129,4 +129,5 @@ dmypy.json
 .pyre/
 
 # VSCode settings
-.vscode
+.vscode/
+.DS_Store/

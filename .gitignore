@@ -131,3 +131,6 @@ dmypy.json
 # VSCode settings
 .vscode/
 .DS_Store/
+
+# Ignore experiment logs
+.experiments/

@@ -11,6 +11,8 @@ EPS = 1e-8
 
 
 def one_hot(indices, dim):
+    indices = jnp.array(indices, dtype=jnp.int32)
+    print(indices.shape)
     batch_dim = indices.shape[0]
     enc = jnp.zeros(shape=(batch_dim, dim))
     return jax.ops.index_update(enc, indices, 1.)
@@ -39,38 +41,50 @@ class _MLP(nn.Module):
 class MLPCategoricalActor(nn.Module):
     """
     """
-    def apply(self, obs, act, action_space=None, rng=None,
-              hidden_sizes=(64, 64), activation_fn=nn.tanh, output_fn=None):
+    def apply(self, obs, act, act_rng, action_space=None, hidden_sizes=(64, 64),
+              activation_fn=nn.tanh, output_fn=None):
         assert action_space is not None, "Action space must be specified."
 
-        if rng is None:
-            rng = nn.make_rng()
+        # get parameters for the MLP
         act_dim = action_space.n
+        if isinstance(hidden_sizes, int):
+            hidden_sizes = [hidden_sizes]
+
+        # compute logits and take action
         logits = _MLP(obs, sizes=list(hidden_sizes) + [act_dim], activation_fn=activation_fn)
-        pi = random.categorical(rng, logits)
+        pi = random.categorical(act_rng, logits)
+
+        # compute log probabilities
         logp_all = nn.log_softmax(logits)
-        logp = jnp.multiply(one_hot(act, act_dim), logp_all).sum(axis=1)
-        logp_pi = jnp.multiply(one_hot(pi, act_dim), logp_all).sum(axis=1)
+        logp = logp_all[act]
+        logp_pi = logp_all[pi]
+
         return pi, logp, logp_pi
 
 
 class MLPGaussianActor(nn.Module):
     """
     """
-    def apply(self, obs, act, action_space=None, logstd_init=logstd_init, rng=None,
+    def apply(self, obs, act, act_rng, action_space=None, logstd_init=logstd_init,
               hidden_sizes=(64, 64), activation_fn=nn.tanh, output_fn=None):
         assert action_space is not None, "Action space must be specified."
 
-        if rng is None:
-            rng = nn.make_rng()
+        # get parameters for the MLP
         act_dim = act.shape[-1]
+        if isinstance(hidden_sizes, int):
+            hidden_sizes = [hidden_sizes]
+
+        # compute mean and take action
         mean = _MLP(obs, sizes=list(hidden_sizes) + [act_dim],
                     activation_fn=activation_fn, output_fn=output_fn)
         logstd = self.param('logstd', (act_dim,), logstd_init)
         std = jnp.exp(logstd)
-        pi = mean + std * random.normal(rng, shape=mean.shape)
+        pi = mean + std * random.normal(act_rng, shape=mean.shape)
+
+        # compute log probabilites
         logp = gaussian_likelihood(act, mean, logstd)
         logp_pi = gaussian_likelihood(pi, mean, logstd)
+
         return pi, logp, logp_pi
 
 
@@ -81,25 +95,3 @@ class MLPCritic(nn.Module):
     def apply(self, obs, hidden_sizes=(64, 64), activation_fn=nn.tanh):
         val = _MLP(obs, sizes=list(hidden_sizes) + [1], activation_fn=activation_fn)
         return val
-
-
-class MLPActorCritic(nn.Module):
-    """
-    """
-    def apply(self, obs, act, action_space=None, rng=None,
-              hidden_sizes=(64, 64), activation_fn=nn.tanh, output_fn=None):
-        assert action_space is not None, "Action space must be specified"
-
-        if rng is None:
-            rng = nn.make_rng()
-
-        if isinstance(action_space, Box):
-            actor = MLPGaussianActor.partial(rng=rng, hidden_sizes=hidden_sizes,
-                                             activation_fn=activation_fn, output_fn=output_fn, name='actor')
-        elif isinstance(action_space, Discrete):
-            actor = MLPCategoricalActor.partial(rng=rng, hidden_sizes=(64, 64),
-                                                activation_fn=nn.tanh, output_fn=None, name='actor')
-
-        pi, logp, logp_pi = actor(obs, act, action_space)
-        val = MLPCritic(obs, hidden_sizes=hidden_sizes, activation_fn=activation_fn, name='critic')
-        return pi, logp, logp_pi, val

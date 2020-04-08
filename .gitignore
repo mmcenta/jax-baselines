@@ -133,4 +133,4 @@ dmypy.json
 .DS_Store/
 
 # Ignore experiment logs
-.experiments/
+experiments/

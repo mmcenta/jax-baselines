@@ -107,8 +107,6 @@ def make_output_format(format, ev_dir):
     elif format == 'json':
         json_file = open(osp.join(ev_dir, 'progress.json'), 'wt')
         return JSONOutputFormat(json_file)
-    elif format == 'tensorboard':
-        return None
     else:
         raise ValueError('Unknown format specified: %s' % (format,))
 
@@ -252,10 +250,10 @@ def configure(dir=None, format_strs=None):
     log('Logging to %s'%dir)
 
 if os.getenv('JAX_BASELINES_LOGDIR'):
-    # if OPENAI_LOGDIR is set, configure the logger on import
+    # if JAX_BASELINES_LOGDIR is set, configure the logger on import
     # this kind of nasty (unexpected to user), but I don't know how else to inject the logger
     # to a script that's getting run in a subprocess
-    configure(dir=os.getenv('OPENAI_LOGDIR'))
+    configure(dir=os.getenv('JAX_BASELINES_LOGDIR'))
 
 def reset():
     Logger.CURRENT = Logger.DEFAULT

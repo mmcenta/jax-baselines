@@ -38,9 +38,9 @@ class GAEBuffer:
         self.val_buf = np.zeros((batch_size,))
         self.adv_buf = np.zeros((batch_size,))
         self.gamma, self.lam, self.eps = gamma, lam, eps
-        self.ptr, self.trajectory_start, self.batch_size = 0, 0, batch_size
+        self.ptr, self.episode_start, self.batch_size = 0, 0, batch_size
 
-    def store_timestep(self, obs, act, rew, val):
+    def store(self, obs, act, rew, val):
         """
         Stores a timestep in the buffer.
 
@@ -61,45 +61,44 @@ class GAEBuffer:
         self.ptr += 1
         return self.ptr == self.batch_size
 
-    def end_trajectory(self, last_val=0):
+    def end_episode(self, last_val=0):
         """
-        Ends the ongoing trajectory and calculates its return and advantage.
+        Ends the ongoing episode and calculates its return and advantage.
 
         Args:
-            last_val: Value of the last state of the trajectory, useful to
-                bootstrap estimates when the trajectory was cut short.
+            last_val: Value of the last state of the episode, useful to
+                bootstrap estimates when the episode was cut short.
         """
-        trajectory = slice(self.trajectory_start, self.ptr)
+        episode = slice(self.episode_start, self.ptr)
 
-        # get the rewards and values of the trajectory
-        rews = np.append(self.rew_buf[trajectory], last_val)
-        vals = np.append(self.val_buf[trajectory], last_val)
+        # get the rewards and values of the episode
+        rews = np.append(self.rew_buf[episode], last_val)
+        vals = np.append(self.val_buf[episode], last_val)
 
         # estimate the advantege using the GAE method
         deltas = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
         adv = reverse_discount_cumsum(deltas, self.gamma * self.lam)
-        self.adv_buf[trajectory] = adv
+        self.adv_buf[episode] = adv
 
         # compute the rewards-to-go
         ret = reverse_discount_cumsum(rews, self.gamma)[:-1]
-        self.ret_buf[trajectory] = ret
+        self.ret_buf[episode] = ret
 
-        self.trajectory_start = self.ptr
+        self.episode_start = self.ptr
 
     def get_batch(self):
         """
         Returns the batch collected on the buffer. Assumes that the buffer is
-        full and that the end_trajectory method was called immediately before.
+        full and that the end_episode method was called immediately before.
 
         Returns:
             A batch containing observations, actions, returns and advantages.
 
         Raises:
             AssertionError: when called on buffer that is not full.
-
         """
         assert self.ptr == self.batch_size, "VPGBuffer batch not complete"
-        self.ptr, self.trajectory_start = 0, 0
+        self.ptr, self.episode_start = 0, 0
 
         # normalize the advantages
         adv_mean, adv_std = np.mean(self.adv_buf), np.std(self.adv_buf)

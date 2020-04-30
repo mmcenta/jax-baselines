@@ -86,27 +86,27 @@ def learn(rng, env_fn, actor_net_fn, critic_net_fn,
             act = actor.step(actor_state, step_rng, obs)
             val = critic.state_value(critic_state, obs).item()
 
-            # convert act to numpy array (because doesn't support JAX)
+            # convert act to numpy array (because gym doesn't support JAX)
             act = np.array(act)
 
             # take the action and store the step on the buffer
-            new_obs, rew, done, _ = env.step(act)
-            epoch_ended = buffer.store_timestep(obs, act, rew, val)
+            next_obs, rew, done, _ = env.step(act)
+            epoch_ended = buffer.store(obs, act, rew, val)
 
             # update episode vars
-            obs = preprocess(new_obs)
+            obs = preprocess(next_obs)
             ep_len += 1
             ep_ret += rew
 
-            # end trajectory if necessary
+            # end episode if necessary
             timeout = (ep_len == max_ep_len)
             terminal = (done or timeout)
             if terminal or epoch_ended:
                 if not terminal:
-                    print("Warning: trajectory cut of by epoch {:} at {:} steps.".format(epoch + 1, ep_len + 1))
+                    print("Warning: episode cut of by epoch {:} at {:} steps.".format(epoch + 1, ep_len + 1))
                 # bootstrap last value if not at terminal state
                 last_val = 0 if done else critic.state_value(critic_state, obs).item()
-                buffer.end_trajectory(last_val)
+                buffer.end_episode(last_val)
                 if terminal:
                     ep_lens.append(ep_len)
                     ep_rets.append(ep_ret)

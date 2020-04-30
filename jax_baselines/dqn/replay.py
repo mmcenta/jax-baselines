@@ -15,15 +15,15 @@ class ReplayMemory:
         self.obs_buf = np.zeros(add_batch_dim(capacity, obs.shape))
         self.act_buf = np.zeros(add_batch_dim(capacity, act.shape))
         self.rew_buf = np.zeros((capacity,))
-        self.new_obs_buf = np.zeros(add_batch_dim(capacity, obs.shape))
+        self.next_obs_buf = np.zeros(add_batch_dim(capacity, obs.shape))
 
         self.ptr, self.size, self.capacity = 0, 0, capacity
 
-    def store_timestep(self, obs, act, rew,  new_obs):
+    def store(self, obs, act, rew,  next_obs):
         self.obs_buf[self.ptr] = obs
         self.act_buf[self.ptr] = act
         self.rew_buf[self.ptr] = rew
-        self.new_obs_buf[self.ptr] = new_obs
+        self.next_obs_buf[self.ptr] = next_obs
 
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
@@ -33,10 +33,10 @@ class ReplayMemory:
         obs = self.obs_buf[batch_indexes]
         act = self.act_buf[batch_indexes]
         rew = self.rew_buf[batch_indexes]
-        new_obs = self.new_obs_buf[batch_indexes]
+        next_obs = self.next_obs_buf[batch_indexes]
         return TransitionBatch(
             observations=jnp.device_put(self.obs_buf),
             actions=jnp.device_put(self.act_buf),
             rewards=jnp.device_put(self.rew_buf),
-            new_observations=jnp.device_put(self.new_obs_buf)
+            next_observations=jnp.device_put(self.next_obs_buf)
         )

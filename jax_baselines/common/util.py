@@ -8,7 +8,7 @@ AdvantageBatch = namedtuple('AdvantageBatch',
     ['observations', 'actions', 'returns', 'advantages'])
 
 TransitionBatch = namedtuple('TransitionBatch',
-    ['observations', 'actions', 'rewards', 'new_observations'])
+    ['observations', 'actions', 'rewards', 'next_observations'])
 
 
 def add_batch_dim(batch_size, shape):

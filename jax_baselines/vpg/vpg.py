@@ -1,263 +1,175 @@
+import functools
 import os
 import time
+from collections import namedtuple
 
-import flax
-from flax import nn
-from flax import optim
 import gym
 from gym.spaces import Box, Discrete
+import haiku as hk
 import jax
+import jax.experimental.optix as optix
 import jax.numpy as jnp
+from jax.experimental.optimizers import adam
 from jax import random
-from jax.ops import index_update
+import numpy as np
 
-from jax_baselines.common.functions import reverse_discount_cumsum
-from jax_baselines.common.modules import MLPCategoricalActor, MLPGaussianActor, MLPCritic
-from jax_baselines.common.util import get_shape, add_batch_dim
+from jax_baselines.common.actor import get_actor
+from jax_baselines.common.critic import StateCritic
+from jax_baselines.common.learner import ActorLearner, StateCriticLearner
+from jax_baselines.common.util import make_preprocessor
 from jax_baselines import logger
 from jax_baselines.save import load_from_zip, save_to_zip
+from jax_baselines.vpg.buffer import VPGBuffer
 
 
-class VPGBuffer:
-    """
-    """
-    def __init__(self, batch_size, obs_dim, act_dim,
-                 gamma=0.99, lam=0.95, eps=1e-8):
-        """
-        """
-        self.obs_buf = jnp.zeros(shape=add_batch_dim(batch_size, obs_dim))
-        self.act_buf = jnp.zeros(shape=add_batch_dim(batch_size, obs_dim))
-        self.rew_buf = jnp.zeros(shape=(batch_size,))
-        self.ret_buf = jnp.zeros(shape=(batch_size,))
-        self.val_buf = jnp.zeros(shape=(batch_size,))
-        self.logp_buf = jnp.zeros(shape=(batch_size,))
-        self.adv_buf = jnp.zeros(shape=(batch_size,))
-        self.gamma, self.lam, self.eps = gamma, lam, eps
-        self.ptr, self.trajectory_start, self.batch_size = 0, 0, batch_size
-
-    def store_timestep(self, obs, act, rew, val, logp):
-        """
-        """
-        assert self.ptr < self.batch_size, "VPGBuffer is full"
-        self.obs_buf = index_update(self.obs_buf, self.ptr, obs)
-        self.act_buf = index_update(self.act_buf, self.ptr, act)
-        self.rew_buf = index_update(self.rew_buf, self.ptr, rew)
-        self.val_buf = index_update(self.val_buf, self.ptr, val)
-        self.logp_buf = index_update(self.logp_buf, self.ptr, logp)
-        self.ptr += 1
-        return self.ptr == self.batch_size
-
-    def end_trajectory(self, last_val=0):
-        """
-        """
-        trajectory = jax.ops.index[self.trajectory_start:self.ptr]
-
-        # get the rewards and values of the trajectory
-        rews = jnp.append(self.rew_buf[trajectory], last_val)
-        vals = jnp.append(self.val_buf[trajectory], last_val)
-
-        # estimate the advantege using the GAE method
-        deltas = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
-        adv = reverse_discount_cumsum(deltas, self.gamma * self.lam)
-        self.adv_buf = index_update(self.adv_buf, trajectory, adv)
-
-        # compute the rewards-to-go
-        ret = reverse_discount_cumsum(rews, self.gamma)[:-1]
-        self.ret_buf = index_update(self.ret_buf, trajectory, ret)
-
-        self.trajectory_start = self.ptr
-
-    def get_batch(self):
-        """
-        """
-        assert self.ptr == self.batch_size, "VPGBuffer batch not complete"
-        self.ptr, self.trajectory_start = 0, 0
-
-        # normalize the advantages
-        adv_mean, adv_std = jnp.mean(self.adv_buf), jnp.std(self.adv_buf)
-        self.adv_buf = (self.adv_buf - adv_mean) / (adv_std + self.eps)
-        return (
-            jax.device_put(self.obs_buf),
-            jax.device_put(self.act_buf),
-            jax.device_put(self.adv_buf),
-            jax.device_put(self.ret_buf),
-            jax.device_put(self.logp_buf),
-        )
-
-
-def learn(rng, env_fn, actor_def, critic_def,
+def learn(rng, env_fn, actor_net_fn, critic_net_fn,
           steps_per_epoch=4000, epochs=50, gamma=0.99, actor_lr=3e-4,
           critic_lr=1e-3, train_value_iters=80, lam=0.97, max_ep_len=1000,
           save_dir='./experiments/vpg', save_freq=10, logger_format_strs=None):
     """
     """
 
-    # Configure logger
+    # configure logger
     logger.configure(dir=save_dir, format_strs=logger_format_strs)
+    logger.set_level(logger.INFO)
+
+    # get observation preprocessor
+    preprocess = make_preprocessor()
 
     # initialize environment and buffer
     env = env_fn()
     action_space = env.action_space
-    obs_shape = get_shape(env.observation_space.sample())
-    act_shape = get_shape(env.action_space.sample())
-    buffer = VPGBuffer(steps_per_epoch, obs_shape, act_shape,
+    dummy_obs = preprocess(env.observation_space.sample())
+    dummy_act = env.action_space.sample()
+    buffer = VPGBuffer(steps_per_epoch, dummy_obs, dummy_act,
                        gamma=gamma, lam=lam)
 
-    # initialize actor
-    rng, init_rng = random.split(rng)
-    actor_input_spec = [
-        (obs_shape, jnp.float32),
-        (act_shape, jnp.int32),
-    ]
-    actor_def = actor_def.partial(action_space=env.action_space)
-    _, initial_params = actor_def.init_by_shape(
-        init_rng, actor_input_spec, act_rng=random.PRNGKey(0))
-    actor = nn.Model(actor_def, initial_params)
-
-    # initialize critic
-    rng, init_rng = random.split(rng)
-    critic_input_spec = [(obs_shape, jnp.float32)]
-    _, initial_params = critic_def.init_by_shape(init_rng, critic_input_spec)
-    critic = nn.Model(critic_def, initial_params)
-
-    # create optimizers for actor and critic
-    actor_optimizer = optim.Adam(learning_rate=actor_lr).create(actor)
-    actor_optimizer = jax.device_put(actor_optimizer)
-    critic_optimizer = optim.Adam(learning_rate=critic_lr).create(critic)
-    critic_optimizer = jax.device_put(critic_optimizer)
-
-    # define loss functions
-    @jax.vmap
-    def actor_loss(logp, adv):
+    # create actor
+    def actor_loss_fn(batch, logp):
+        adv = batch.advantages
         return -(logp * adv).mean()
 
+    actor = ActorLearner(
+        get_actor(action_space, actor_net_fn),
+        adam(actor_lr),
+        actor_loss_fn,
+    )
 
-    @jax.vmap
-    def critic_loss(val, ret):
+    # create critc
+    def critic_loss_fn(batch, val):
+        ret = batch.returns
         return jnp.square(val - ret).mean()
 
+    critic = StateCriticLearner(
+        StateCritic(critic_net_fn),
+        adam(actor_lr),
+        critic_loss_fn,
+    )
 
-    # define training steps for the actor and the critic
-    @jax.jit
-    def actor_train_step(rng, optimizer, obs, act, adv):
-        def loss_fn(actor):
-            pi, logp, logp_pi = actor(obs, act, rng)
-            loss = jnp.mean(actor_loss(logp, adv))
-            return loss
-        loss, grad = jax.value_and_grad(loss_fn)(optimizer.target)
-        optimizer = optimizer.apply_gradient(grad)
-        return optimizer, loss
+    # initialize states
+    rng, arng, crng = random.split(rng, 3)
+    actor_state = actor.init_state(arng, dummy_obs)
+    critic_state = critic.init_state(crng, dummy_obs)
 
-
-    @jax.jit
-    def critic_train_step(optimizer, obs, ret):
-        def loss_fn(critic):
-            val = critic(obs)
-            loss = jnp.mean(critic_loss(val, ret))
-            return loss
-        loss, grad = jax.value_and_grad(loss_fn)(optimizer.target)
-        optimizer = optimizer.apply_gradient(grad)
-        return optimizer, loss
-
-
-    # define the function that consumes the batch to train
-    def update(rng, actor_optimizer, critic_optimizer):
-        obs, act, adv, ret, old_logp = buffer.get_batch()
-
-        def eval(rng):
-            # compute actor loss
-            actor = actor_optimizer.target
-            _, logp, _ = actor(obs, act, rng)
-            actor_loss = jnp.mean(actor_loss(logp, adv))
-
-            # compute critic loss
-            critic = critic_optimizer.target
-            val = critic(obs)
-            critic_loss = jnp.mean(critic_loss(val, ret))
-
-            return actor_loss, critic_loss, logp
-
-        # evaluate before training
-        rng, eval_rng = random.split(rng)
-        old_actor_loss, old_critic_loss, _ = eval(eval_rng)
-
-        # run policy gradient step
-        rng, step_rng = random.split()
-        actor_optimizer, actor_loss = actor_train_step(step_rng, actor_optimizer, obs, act, adv)
-
-        # run value gradient steps
-        for _ in range(train_value_iters):
-            critic_optimizer, critic_loss = critic_train_step(critic_optimizer, obs, ret)
-
-        # evaluate after training
-        actor_loss, critic_loss, logp = eval(rng)
-
-        # get metrics of the update
-        approx_kl = (old_logp - logp).sum().item()
-        approx_ent = (-logp).mean().item()
-        metrics = {
-            'actor_loss': old_actor_loss,
-            'critic_loss': old_critic_loss,
-            'kl': approx_kl,
-            'entropy': approx_ent,
-            'delta_actor_loss': (actor_loss - old_actor_loss),
-            'delta_critic_loss': (critic_loss - old_critic_loss)
-        }
-
-        # log metrics
-        # TODO: add tensorboard support
-        logger.logkvs(metrics)
-
-        return actor_optimizer, critic_optimizer
-
-
-    start_time = time.time()
-    obs, act = env.reset(), action_space.sample()
+    # training loop
     ep_len, ep_ret = 0, 0
-    actor_loss, critic_loss, logp = 0., 0., 0.
+    obs = preprocess(env.reset())
     for epoch in range(epochs):
-        for t in range(steps_per_epoch):
-            rng, act_rng = random.split(rng)
+        start_time = time.time()
+        ep_lens, ep_rets = [], []
 
-            # get next action, its logprob and the state value
-            act, _, logp_pi = actor(obs, act, act_rng)
-            val = critic(obs).item()
+        # experience loop
+        for t in range(steps_per_epoch):
+            rng, step_rng = random.split(rng)
+
+            # get next action and current state value
+            act = actor.step(actor_state, step_rng, obs)
+            val = critic.state_value(critic_state, obs).item()
+
+            # convert act to numpy array (because doesn't support JAX)
+            act = np.array(act)
 
             # take the action and store the step on the buffer
-            new_obs, rew, done, _ = env.step(act.item())
-            epoch_ended = buffer.store_timestep(obs, act, rew, val, logp_pi)
+            new_obs, rew, done, _ = env.step(act)
+            epoch_ended = buffer.store_timestep(obs, act, rew, val)
 
-            # update obs
-            obs = new_obs
+            # update episode vars
+            obs = preprocess(new_obs)
+            ep_len += 1
+            ep_ret += rew
 
             # end trajectory if necessary
             timeout = (ep_len == max_ep_len)
             terminal = (done or timeout)
             if terminal or epoch_ended:
                 if not terminal:
-                    print("Warning: trajectory cut of by epoch {:} at {:} steps.".format(epoch, t))
+                    print("Warning: trajectory cut of by epoch {:} at {:} steps.".format(epoch + 1, ep_len + 1))
                 # bootstrap last value if not at terminal state
-                last_val = 0 if done else critic(obs).item()
+                last_val = 0 if done else critic.state_value(critic_state, obs).item()
                 buffer.end_trajectory(last_val)
                 if terminal:
-                    logger.logkvs({
-                        'ep_ret': ep_ret,
-                        'ep_len': ep_len,
-                    })
-                obs, ep_ret, ep_len = env.reset(), 0, 0
+                    ep_lens.append(ep_len)
+                    ep_rets.append(ep_ret)
+                obs = preprocess(env.reset())
+                ep_ret, ep_len = 0, 0
 
         # save agent
         if (epoch % save_freq == 0) or (epoch == epochs - 1):
-            agent_dict = {'actor': actor, 'critic': critic}
+
+            actor_params = actor.get_params(actor_state)
+            critic_params = critic.get_params(critic_state)
+            agent_dict = {
+                'actor_params': actor_params,
+                'critic_params': critic_params,
+            }
             save_to_zip(save_dir, agent_dict)
 
-        # run VPG update
-        rng, act_rng = random.split(rng)
-        update(act_rng)
+        # get batch
+        batch = buffer.get_batch()
+
+        # get old logp and losses
+        if epoch > 0:
+            old_logp = logp
+            old_actor_loss = actor_loss
+            old_critic_loss = critic_loss
+        else:
+            old_logp = actor.logp(actor_state, batch.observations, batch.actions)
+            old_actor_loss = actor.loss(actor_state, batch)
+            old_critic_loss = critic.loss(critic_state, batch)
+
+        # update parameters
+        actor_state = actor.update(epoch, actor_state, batch)
+        for k in range(train_value_iters):
+            critic_state = critic.update(epoch * train_value_iters + k,
+                critic_state, batch)
+
+        # get new logp and losses
+        logp = actor.logp(actor_state, batch.observations, batch.actions)
+        actor_loss = actor.loss(actor_state, batch)
+        critic_loss = critic.loss(critic_state, batch)
+
+        # convert to array to extract metrics easily
+        ep_lens = jnp.array(ep_lens)
+        ep_rets = jnp.array(ep_rets)
+
+        # log epoch
+        logger.info('epoch {:}'.format(epoch))
+
+        # log train metrics
+        logger.logkv('actor_loss', old_actor_loss)
+        logger.logkv('critic_loss', old_critic_loss)
+        logger.logkv('kl', (old_logp - logp).sum().item())
+        logger.logkv('entropy', (-logp).mean().item())
+        logger.logkv('delta_actor_loss', (actor_loss - old_actor_loss))
+        logger.logkv('delta_critic_loss', (critic_loss - old_critic_loss))
 
         # log epoch metrics
         logger.logkv('epoch', epoch)
         logger.logkv('time', time.time() - start_time)
+        logger.logkv('ep_len_mean', ep_lens.mean())
+        logger.logkv('ep_len_std', ep_lens.std())
+        logger.logkv('ep_rets_mean', ep_rets.mean())
+        logger.logkv('ep_rets_std', ep_rets.std())
         logger.dumpkvs()
 
 
@@ -273,11 +185,11 @@ if __name__ == "__main__":
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='Discount parameter.')
     parser.add_argument('--lam', type=float, default=0.97,
-                        help='Lmbda parameter of Generalized Advantage Estimation (GAE).')
+                        help='Lambda parameter of Generalized Advantage Estimation (GAE).')
     parser.add_argument('--seed', '-s', type=int, default=0,
                         help='Seed for the random number generator.')
     parser.add_argument('--steps', type=int, default=4000,
-                        help='Number of training steps per epoch.')
+                        help='Number of timesteps per epoch.')
     parser.add_argument('--epochs', type=int, default=50,
                         help='Number of training epochs.')
     parser.add_argument('--exp-name', type=str, default='vpg',
@@ -287,20 +199,21 @@ if __name__ == "__main__":
     # Path where all experiment data and saves will be dumped
     save_dir = os.path.join('./experiments', args.exp_name)
 
-    # Create agent def
+    # Define actor and critic neural networks
     action_space = gym.make(args.env).action_space
     if isinstance(action_space, Box):
-        actor_def = MLPGaussianActor.partial(hidden_sizes=(args.hidden_size,) * args.layers,
-                                             activation_fn=nn.tanh, output_fn=None)
+        act_dim = action_space.sample().shape[-1]
     elif isinstance(action_space, Discrete):
-        actor_def = MLPCategoricalActor.partial(hidden_sizes=(args.hidden_size,) * args.layers,
-                                                activation_fn=nn.tanh, output_fn=None)
+        act_dim = action_space.n
+    else:
+        raise ValueError("Environment action space type not supported.")
 
-    # Create critic def
-    critic_def = MLPCritic.partial(hidden_sizes=(args.hidden_size,) * args.layers, activation_fn=nn.tanh)
+    actor_net_fn = lambda obs: hk.nets.MLP(output_sizes=[64, 64, act_dim])(obs)
+    critic_net_fn = lambda obs: hk.nets.MLP(output_sizes=[64, 64, 1])(obs)
 
     # Run experiment
     key = random.PRNGKey(args.seed)
-    learn(key, lambda: gym.make(args.env), actor_def, critic_def,
+    learn(key, lambda: gym.make(args.env),
+          actor_net_fn, critic_net_fn,
           steps_per_epoch=args.steps, epochs=args.epochs, gamma=args.gamma,
           lam=args.lam, save_dir=save_dir)

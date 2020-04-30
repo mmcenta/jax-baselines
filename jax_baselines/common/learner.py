@@ -2,6 +2,7 @@ from functools import partial
 
 import jax
 import jax.random as random
+import jax.numpy as jnp
 
 
 class Learner:
@@ -66,11 +67,12 @@ class ActionCriticLearner(Learner):
         critic,
         opt,
         loss_fn,
+        double_q=True,
     ):
         def loss(params, batch):
-            obs = batch.observations
-            actions_vals = critic.action_values(params, obs)
-            return loss_fn(batch, actions_vals)
+            q_vals = critic.action_values(params, batch.observations)
+            next_q_vals = critic.action_values(params, batch.next_observations)
+            return loss_fn(batch, q_vals, next_q_vals)
 
         super(ActionCriticLearner, self).__init__(opt, critic.init_params, loss)
         self.critic = critic

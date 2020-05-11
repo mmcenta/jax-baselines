@@ -19,7 +19,7 @@ from jax_baselines.common.learner import ActorLearner, StateCriticLearner
 from jax_baselines.common.util import make_preprocessor
 from jax_baselines import logger
 from jax_baselines.save import load_from_zip, save_to_zip
-from jax_baselines.vpg.buffer import VPGBuffer
+from jax_baselines.vpg.buffer import GAEBuffer
 
 
 def learn(rng, env_fn, actor_net_fn, critic_net_fn,
@@ -41,7 +41,7 @@ def learn(rng, env_fn, actor_net_fn, critic_net_fn,
     action_space = env.action_space
     dummy_obs = preprocess(env.observation_space.sample())
     dummy_act = env.action_space.sample()
-    buffer = VPGBuffer(steps_per_epoch, dummy_obs, dummy_act,
+    buffer = GAEBuffer(steps_per_epoch, dummy_obs, dummy_act,
                        gamma=gamma, lam=lam)
 
     # create actor
@@ -178,10 +178,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='CartPole-v0',
                         help='Environment id.')
-    parser.add_argument('--hidden-size', '-hs', type=int, default=64,
-                        help='Hidden layer size (same for all layers).')
-    parser.add_argument('--layers', '-l', type=int, default=2,
-                        help='Number of layers.')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='Discount parameter.')
     parser.add_argument('--lam', type=float, default=0.97,

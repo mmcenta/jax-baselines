@@ -71,8 +71,9 @@ class ActionCriticLearner(Learner):
     ):
         def loss(params, batch):
             q_vals = critic.action_values(params, batch.observations)
+            q_val = q_vals[jnp.arange(q_vals.shape[0]), batch.actions.astype(jnp.int32)]
             next_q_vals = critic.action_values(params, batch.next_observations)
-            return loss_fn(batch, q_vals, next_q_vals)
+            return loss_fn(batch, q_val, next_q_vals)
 
         super(ActionCriticLearner, self).__init__(opt, critic.init_params, loss)
         self.critic = critic

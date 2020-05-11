@@ -9,7 +9,7 @@ class ReplayMemory:
     def __init__(self, capacity, obs, act):
         # convert obs and act to arrays
         obs = np.array(obs)
-        act = np.arrays(act)
+        act = np.array(act)
 
         # use numpy for faster operations
         self.obs_buf = np.zeros(add_batch_dim(capacity, obs.shape))
@@ -35,8 +35,8 @@ class ReplayMemory:
         rew = self.rew_buf[batch_indexes]
         next_obs = self.next_obs_buf[batch_indexes]
         return TransitionBatch(
-            observations=jnp.device_put(self.obs_buf),
-            actions=jnp.device_put(self.act_buf),
-            rewards=jnp.device_put(self.rew_buf),
-            next_observations=jnp.device_put(self.next_obs_buf)
+            observations=jnp.device_put(obs),
+            actions=jnp.device_put(act),
+            rewards=jnp.device_put(rew),
+            next_observations=jnp.device_put(next_obs)
         )

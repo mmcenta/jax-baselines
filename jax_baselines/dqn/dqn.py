@@ -55,14 +55,15 @@ def learn(rng, env_fn, net_fn,
     memory = ReplayMemory(memory_size, dummy_obs, dummy_act)
 
     # create action critic
-    def loss_fn(batch, q_val, next_q_vals):
-        target = batch.rewards + gamma * next_q_vals.max(axis=1)
-        return huber_loss(q_val -  target).mean()
+    def loss_fn(target, q_val):
+        return huber_loss(target - q_val).mean()
 
     critic = ActionCriticLearner(
         DiscreteActionCritic(net_fn, action_space.n),
         adam(lr),
         loss_fn,
+        target_train_steps=1000,
+        double_q=True,
     )
 
     # initialize state
@@ -71,7 +72,7 @@ def learn(rng, env_fn, net_fn,
 
     # training loop
     start_time = time.time()
-    loss_mean = 0
+    losses = []
     obs = preprocess(env.reset())
     for i in range(int(steps)):
         rng, step_rng = random.split(rng)
@@ -83,17 +84,18 @@ def learn(rng, env_fn, net_fn,
         else:
             q_vals = critic.action_values(state, obs)
             act = jnp.argmax(q_vals).item()
+
         new_obs, rew, done, _ = env.step(act)
+        new_obs = preprocess(new_obs)
 
         # store transition and update obs
-        new_obs = preprocess(new_obs)
         memory.store(obs, act, rew, new_obs)
+        obs = new_obs
 
         # start new episode if finished
         if done:
+            memory.store(obs, act, 0, new_obs, is_terminal=True)
             obs = preprocess(env.reset())
-        else:
-            obs = new_obs
 
         # update the network
         if i >= warmup and (i - warmup) % train_freq == 0:
@@ -105,7 +107,7 @@ def learn(rng, env_fn, net_fn,
 
             # get loss
             loss = critic.loss(state, batch)
-            loss_mean += loss / eval_freq
+            losses.append(loss)
 
         # run evaluation
         if i % eval_freq == 0 and i > 0:
@@ -118,7 +120,7 @@ def learn(rng, env_fn, net_fn,
                 done = False
                 obs = preprocess(eval_env.reset())
                 while not done:
-                    q_vals = critic.action_values(state, obs)
+                    q_vals = critic.action_values(state, obs, train=False)
                     qs.append(jnp.max(q_vals).item())
                     act = jnp.argmax(q_vals).item()
                     obs, rew, done, _ = eval_env.step(act)
@@ -132,13 +134,16 @@ def learn(rng, env_fn, net_fn,
             ep_lens, ep_rets = np.array(ep_lens), np.array(ep_rets)
             logger.info('evaluation at step {:}'.format(i))
             logger.info('elapsed time {:}'.format(time.time() - start_time))
-            logger.logkv('loss_mean', loss_mean)
+            logger.logkv('loss_mean', sum(losses) / len(losses))
             logger.logkv('ep_len_mean', ep_lens.mean())
             logger.logkv('ep_len_std', ep_lens.std())
             logger.logkv('ep_ret_mean', ep_rets.mean())
             logger.logkv('ep_ret_std', ep_rets.std())
             logger.logkv('q_mean', sum(q_vals) / len(q_vals))
             logger.dumpkvs()
+
+            # reset loss buffer
+            losses = []
 
 
         # save model

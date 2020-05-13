@@ -45,8 +45,7 @@ def learn(rng, env_fn, actor_net_fn, critic_net_fn,
                        gamma=gamma, lam=lam)
 
     # create actor
-    def actor_loss_fn(batch, logp):
-        adv = batch.advantages
+    def actor_loss_fn(adv, logp):
         return -(logp * adv).mean()
 
     actor = ActorLearner(
@@ -56,8 +55,7 @@ def learn(rng, env_fn, actor_net_fn, critic_net_fn,
     )
 
     # create critc
-    def critic_loss_fn(batch, val):
-        ret = batch.returns
+    def critic_loss_fn(ret, val):
         return jnp.square(val - ret).mean()
 
     critic = StateCriticLearner(

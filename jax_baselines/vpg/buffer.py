@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax_baselines.common.functions import reverse_discount_cumsum
-from jax_baselines.common.util import AdvantageBatch, add_batch_dim
+from jax_baselines.common.util import add_batch_dim
 
 
 class GAEBuffer:
@@ -103,9 +103,9 @@ class GAEBuffer:
         # normalize the advantages
         adv_mean, adv_std = np.mean(self.adv_buf), np.std(self.adv_buf)
         self.adv_buf = (self.adv_buf - adv_mean) / (adv_std + self.eps)
-        return AdvantageBatch(
-            observations=jax.device_put(self.obs_buf),
-            actions=jax.device_put(self.act_buf),
-            returns=jax.device_put(self.ret_buf),
-            advantages=jax.device_put(self.ret_buf),
-        )
+        return {
+            "observations": jax.device_put(self.obs_buf),
+            "actions": jax.device_put(self.act_buf),
+            "returns": jax.device_put(self.ret_buf),
+            "advantages": jax.device_put(self.ret_buf),
+        }

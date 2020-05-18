@@ -104,7 +104,6 @@ class ActionCriticLearner(Learner):
         tau=1e-2,
         target_train_steps=100,
         double_q=False,
-        n_multistep=1,
     ):
         def loss(params, batch):
             q_vals = critic.action_values(params, batch['observations'])
@@ -117,10 +116,10 @@ class ActionCriticLearner(Learner):
 
         if double_q:
             self._targets = get_double_q_target_fn(
-                critic.action_values, self.get_params, gamma ** n_multistep)
+                critic.action_values, self.get_params, gamma)
         else:
             self._targets = get_q_target_fn(
-                critic.action_values, gamma ** n_multistep)
+                critic.action_values, gamma)
         self.critic = critic
         self.gamma = gamma
         self.polyak = polyak

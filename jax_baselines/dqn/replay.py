@@ -5,7 +5,7 @@ from jax.ops import index_update
 from jax_baselines.common.util import add_batch_dim
 
 
-class ReplayMemory:
+class ReplayBuffer:
     def __init__(self, capacity, obs, act):
         # convert obs and act to arrays
         obs = np.array(obs)
@@ -44,3 +44,7 @@ class ReplayMemory:
             "is_terminal": jnp.device_put(is_terminal),
             "next_observations": jnp.device_put(next_obs),
         }
+
+
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity, obs, act):

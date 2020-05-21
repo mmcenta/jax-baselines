@@ -69,6 +69,7 @@ def get_q_target_fn(q_value_fn, gamma=0.99):
 
     return jax.jit(get_targets)
 
+
 def get_double_q_target_fn(q_value_fn, get_params_fn, gamma=0.99):
     def get_targets(state, batch):
         batch_size = batch['observations'].shape[0]
